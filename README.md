@@ -1,96 +1,65 @@
 # ut-schedule-optimizer
 
-## What this does
+A course scheduling tool for UT Austin registration. Given a list of courses and the sections offered for each, it picks the combination that avoids time conflicts and ranks the rest by walking distance between back-to-back classes and instructor quality (grade distribution, RateMyProfessor rating).
 
-Given a list of UT Austin courses you want to take and the sections offered for
-each, this tool picks the combinations that fit together best. It rules out any
-schedule where two classes overlap in time, then ranks the rest by how much
-walking they force between back-to-back classes, how generously the instructors
-tend to grade, and how their students rate them. Version 1 runs entirely on
-JSON data you enter by hand in `data/` — nothing is scraped.
+I built this because UT registration involves the same manual trade-off every semester — pick classes that don't overlap, aren't too far apart, and have decent professors — and I was doing that math by hand every time. This automates it and makes the trade-offs explicit instead of guessed.
 
-## How to run it
+## How it works
 
-```sh
+Each course can have multiple sections, and each section can have multiple meetings — a lecture plus a separately-scheduled lab in a different building, for example. The optimizer enumerates every combination of one section per course, drops any combination with a real time conflict, and scores the rest.
+
+Scoring is a weighted sum of three costs: walking cost, grade cost, and RMP cost, each tunable via CLI flag. The walking cost is the part with actual design behind it. For every pair of back-to-back classes on the same day, it takes the scheduled gap, adds a fixed buffer for the fact that professors tend to let class out early, and subtracts the estimated walk time (straight-line distance between building coordinates, scaled by a route factor to account for not walking through buildings). What's left is slack, and the cost curve has four regimes based on it: negative slack (you can't make it — a heavy, growing penalty), a small comfortable window (flat, low cost), a wider window (idle cost that grows with how much dead time there is), and a long-break cutoff past which the cost barely grows further, since a 90-minute gap isn't meaningfully worse than a 50-minute one.
+
+Two implementation details worth calling out. First, the walk-cost constants weren't picked correctly on the first attempt — an early version let the "comfortable walk" cost dominate real differences in instructor quality, so a worse-but-zero-walk schedule would outrank a better one with a short comfortable walk. Fixed by rescaling the constants against the actual observed range of grade/RMP costs in the data, not by feel. Second, the early-release buffer was initially 10 minutes and misjudged a real, makable back-to-back transition on my own schedule as physically impossible; bumped to 15 after checking it against how early professors actually let classes out.
+
+Weekday identity affects only feasibility, not cost — two meetings on different days never conflict, but once a schedule is feasible, a Monday walk isn't weighted differently from a Friday one. That's a deliberate simplification, not an oversight.
+
+## Validation
+
+- **Real schedule** (`data/courses_fall_actual.json`) — my actual registered Fall courses, used to confirm the parser and conflict checker agree with UT's own registration system.
+- **Synthetic stress test** (`data/courses_test_pool.json`) — a wider dataset built to force genuine trade-offs between walking distance and instructor quality, confirming neither factor dominates the ranking by default.
+- **Demo fixture** (`data/courses_demo.json`) — hand-built cases covering each walk-cost regime end to end, anchored to real UT building coordinates.
+
+## Getting started
+
+```bash
+git clone https://github.com/<your-username>/ut-schedule-optimizer.git
+cd ut-schedule-optimizer
 python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # macOS / Linux
-pip install -r requirements.txt   # no third-party packages yet; stdlib only
-
-python main.py                                   # default weights
-python main.py --walk-weight 2.0 --top 10        # punish walking harder, show 10
-python main.py --grade-weight 1.5 --rmp-weight 0  # ignore RMP, favor easy grading
-python main.py --courses data/courses_fall_actual.json --walk-detail  # score one fixed schedule
+venv\Scripts\activate      # Windows
+# source venv/bin/activate # macOS/Linux
+pip install -r requirements.txt
+python main.py
 ```
 
-`python main.py --help` lists every flag. `--courses` points at a different
-courses JSON; `--walk-detail` prints the walking cost of each back-to-back
-transition. Edit the files in `data/` to change the courses, buildings, or
-scores it runs against.
+## Usage
 
-## How schedules are scored
+```bash
+python main.py                                    # default weights
+python main.py --walk-weight 2.0 --top 10          # weight walking more heavily, show top 10
+python main.py --grade-weight 1.5 --rmp-weight 0   # ignore RMP, favor easy grading
+python main.py --courses data/courses_fall_actual.json --walk-detail
+```
 
-Every valid schedule gets a total cost — **lower is better** — built from three
-parts, each weighted by a flag you can tune:
+`--courses` points at a different courses file. `--walk-detail` prints the walking cost of each individual back-to-back transition instead of just the total. `python main.py --help` lists every flag.
 
-- **Walk cost** — the pain of getting between back-to-back classes on the same
-  day. Driven by the gap between one class ending and the next starting versus
-  how far apart their buildings are (see the three cases below).
-- **Grade cost** — how hard the instructors grade. Based on the historical
-  average GPA for that course with that instructor; a lower class average means
-  a higher cost.
-- **RMP cost** — how students rate the instructor on RateMyProfessor. A lower
-  star rating means a higher cost.
+## Project structure
 
-Missing grade or RMP data falls back to a neutral middle value rather than
-helping or hurting the schedule.
+```
+data/            course, building, and instructor-score JSON (hand-entered)
+scheduler/
+  models.py      Course, Section, Meeting dataclasses
+  distance.py    walking-time estimate and the gap_cost curve
+  optimizer.py   conflict detection and weighted ranking
+  data_loader.py loads and validates the JSON files
+tests/           unit tests for distance.py and optimizer.py
+main.py          CLI entry point
+```
 
-### The three walk-cost cases
+## Limitations
 
-For each pair of back-to-back classes, we start from the scheduled gap between
-them, add a fixed buffer for the fact that professors usually let class out a
-little early, and subtract the estimated walking time. What's left is your
-*slack*:
-
-- **Too tight (negative slack)** — you can't physically make it to the next
-  class on time. Heavy penalty that grows with how many minutes short you are.
-  It's large enough to sink the schedule to the bottom of the ranking, but the
-  schedule is still shown rather than hidden.
-- **Sweet spot (a little slack, up to ~15 minutes)** — enough time to walk over
-  comfortably without standing around. Small, flat cost.
-- **Too loose (lots of slack)** — you make it easily but now have dead time on
-  campus. Cost rises with the amount of idle time, but far more gently than the
-  "too tight" penalty: being early is annoying, not disqualifying.
-- **Long break (slack past ~45 minutes over the sweet spot)** — the gap is now
-  long enough to be genuinely useful for lunch or studying, so the cost keeps
-  growing only very slowly. A 90-minute gap costs barely more than a 50-minute
-  one.
-
-## Known limitations
-
-- **Hand-entered data.** All course, building, and score data in `data/` is
-  typed in manually for this version. It's a demo dataset, not a live feed.
-- **The walk-cost constants had to be recalibrated.** They were first picked by
-  feel, and the sweet-spot cost turned out large enough that a few comfortable
-  walks in a week could outweigh a real difference in grades or ratings — a
-  better schedule lost to a worse one that just happened to involve no walking.
-  They were then rescaled against the actual spread of grade/RMP costs in the
-  data. Lesson: cost terms that get added together have to be calibrated against
-  each other on real numbers, not tuned in isolation — and their bounds have to
-  be sanity-checked against realistic schedule shapes (a lunch break is a
-  common, non-broken pattern; an early version penalized it almost as hard as an
-  impossible back-to-back).
-- **Only same-day, back-to-back adjacencies are modeled.** The walk cost looks
-  at consecutive classes on one day. It doesn't consider anything spanning days,
-  like an 8am after a class that ends at 9pm the night before.
-- **No course evaluation (CES) data.** UT's official course evaluations are
-  gated behind a per-student login and can't be collected at scale, so they're
-  deliberately left out.
+All data is hand-entered for this version — nothing is scraped. Only same-day, back-to-back adjacencies are modeled; a gap spanning two days (an 8am after a class that ended at 9pm the night before) isn't considered. UT's official course evaluations (CES) are gated behind a per-student login and can't be collected at scale, so they're deliberately excluded in favor of grade distributions and RateMyProfessor.
 
 ## Future work
 
-- A live scraping pipeline for grade distributions, the course schedule, and RMP
-  data, replacing the hand-entered JSON.
-- NLP sentiment analysis on RMP free-text reviews, not just the star rating.
-- Semester-long optimization: balancing workload across weeks and accounting for
-  exam clustering, not just a single weekly grid.
+A live scraping pipeline for grade distributions, the course schedule, and RMP data. NLP sentiment analysis on RMP free-text reviews rather than just the star rating. Semester-long optimization that accounts for workload balance and exam clustering, not just a single weekly grid.
