@@ -1,0 +1,2 @@
+# v1 runs on the standard library only.
+# Optimizer / solver deps will be pinned here when we start implementing logic.
